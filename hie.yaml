@@ -1,0 +1,13 @@
+cradle:
+  stack:
+    - path: "./src"
+      component: "ghc-scratch:lib"
+
+    - path: "./app/Main.hs"
+      component: "ghc-scratch:exe:ghc-scratch-exe"
+
+    - path: "./app/Paths_ghc_scratch.hs"
+      component: "ghc-scratch:exe:ghc-scratch-exe"
+
+    - path: "./test"
+      component: "ghc-scratch:test:ghc-scratch-test"
