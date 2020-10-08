@@ -74,7 +74,7 @@ repl env = do
 
     Just input | (T.pack "import") `T.isPrefixOf` (T.pack input) -> do
                    let mod = concat $ tail $ words input
-                   env' <- ghcCatch (session env (eval input))
+                   env' <- ghcCatch $ session env $ addImport mod
                    maybe (repl env) repl env'
 
     Just input -> do
