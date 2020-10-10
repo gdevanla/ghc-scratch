@@ -2,7 +2,12 @@ module Example where
 
 --data Animal = Cat | Dog
 
-data Fund = Fund1 {z:: Integer, y:: String}
+data Fund1 = FundCon1 {z1 :: Integer, y1 :: String}
+
+data Fund2 = FundCon2 {z2 :: Integer, y2 :: String}
+
 
 --add :: Int -> Int -> Int
 --add x y = x + y
+
+--func = Fund1 {}

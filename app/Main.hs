@@ -1,10 +1,14 @@
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Main where
 
 -- import GHC (
 --   HscEnv, runGhc, getSessionDynFlags)
 import GHC
+import GHC.Hs
 import GHC.Paths
 import GHC.LanguageExtensions
 import DynFlags
@@ -17,6 +21,9 @@ import Unsafe.Coerce (unsafeCoerce)
 import Control.Exception
 import System.Console.Haskeline
 import qualified Data.Text as T
+import Data.Maybe
+import RdrName
+import OccName (occNameString)
 
 banner :: MonadIO m => String -> m ()
 banner msg =
@@ -105,6 +112,70 @@ showGhc :: (Outputable a) => a -> String
 showGhc = showPpr unsafeGlobalDynFlags
 
 
+-- findFields :: String -> [LHsDecl a] -> String
+-- findFields ctxStr decls = let
+--   unLocs = unLoc <$> decls
+--   filtDecl = findDecl unLocs
+
+--   findDecl :: [HsDecl a] -> HsDecl a
+--   findDecl = filter isMatch
+--     where
+--       isMatch decl =
+--         case decl of
+--           TyClD _ (DataDecl{..}) -> do
+--             case tcdDataDefn of
+--               HsDataDefn {..} -> do
+--                 let conDecls = filter isMatch' $ unLoc <$> dd_cons
+--                       where
+--                     isMatch' conDecl = case condDecl of
+--                       ConDeclGADT {..} -> False -- TODO: Support GADTs
+--                       ConDeclH98 {..} -> do
+--                   case con_args of
+--                     -- RecCon fld -> liftIO $ putStrLn $ showGhc $ unLoc <$> unLoc fld
+--                     RecCon fld ->
+--                       case unLoc . head . unLoc $ fld of
+--                         ConDeclField {..} -> liftIO $ putStrLn $ showGhc $ unLoc cd_fld_type
+--                         otherwise -> liftIO $ putStrLn "XXConfField"
+--                 otherwise -> liftIO $ putStrLn "not record"
+--         otherwise -> liftIO $ putStrLn "----"
+
+
+-- findFields :: String -> [LHsDecl a] -> String
+-- findFields  ctxStr decls =
+--   let
+--     tyclDecls = [decl | decl <- listify (\(_ :: (TyCld GhcPs)) -> True) decls]
+--     dataDefns = [tcdDataDefn decl | decl <- listify (\(_ :: (DataDecl GhcPs)) -> True) tyclDecls]
+--     --conDeclH98 = [decl | decl <- listify (\(_ :: ConDeclH98)$ (unLoc <$> (dd_cons dataDefns))]
+--   in
+--     dataDefns
+
+--findFields :: String -> [LHsDecl a] -> String
+findFields  ctxStr decls = name_type
+  where
+    dataDefns = catMaybes $ findDataDefns <$> decls
+    findDataDefns decl =
+      case decl of
+        TyClD _ (DataDecl{tcdDataDefn}) -> Just tcdDataDefn
+        _ -> Nothing
+    conDecls = concat [ unLoc <$> dd_cons dataDefn | dataDefn <- dataDefns]
+    h98 = catMaybes $ findH98 <$> conDecls
+    findH98 conDecl = case conDecl of
+      ConDeclH98{..} -> Just (unLoc con_name, con_args)
+      ConDeclGADT{..} -> Nothing  -- TODO: Expand this out later
+    conArgs = [snd x | x  <- h98, (occNameString . rdrNameOcc . fst $ x) == ctxStr]
+    flds = concat . catMaybes $ getFlds <$> conArgs
+    getFlds conArg = case conArg of
+      RecCon rec -> Just $ unLoc <$> (unLoc rec)
+      otherwise -> Nothing
+    name_type = extract <$> flds
+    extract ConDeclField{..} = let
+      fld_type = unLoc cd_fld_type
+      fld_name = rdrNameFieldOcc $ unLoc . head $ cd_fld_names --TODO: Why is cd_fld_names is a list?
+        in
+        (fld_name, fld_type)
+
+
+
 main :: IO ()
 main = runGhc (Just libdir) $ do
   env <- getSession
@@ -152,6 +223,9 @@ main = runGhc (Just libdir) $ do
 
       liftIO $ putStrLn $ showGhc $ tcdDataDefn
     _ -> liftIO $ putStrLn "nothing here"
+
+
+  liftIO $ putStrLn $ showGhc $ findFields "FundCon1" (unLoc <$> hsmodDecls hsmodule)
 
   -- liftIO $ banner "Renamed Module"
   -- liftIO $ putStrLn $ showGhc ( tm_renamed_source tmod )
