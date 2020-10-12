@@ -24,6 +24,12 @@ import qualified Data.Text as T
 import Data.Maybe
 import RdrName
 import OccName (occNameString)
+import TcRnTypes
+import Id
+import qualified Var
+import ConLike
+import DataCon
+import HscTypes (lookupTypeEnv)
 
 banner :: MonadIO m => String -> m ()
 banner msg =
@@ -150,6 +156,7 @@ showGhc = showPpr unsafeGlobalDynFlags
 --     dataDefns
 
 --findFields :: String -> [LHsDecl a] -> String
+findFields :: String -> [HsDecl GhcPs] -> [(Located RdrName, HsType GhcPs)]
 findFields  ctxStr decls = name_type
   where
     dataDefns = catMaybes $ findDataDefns <$> decls
@@ -175,6 +182,18 @@ findFields  ctxStr decls = name_type
         (fld_name, fld_type)
 
 
+-- safeTyThingId :: TyThing -> True
+-- safeTyThingId (AConLike (RealDataCon dc)) = dataConWrapId dc
+-- safeTyThingId _ = False
+
+--nameMatches :: String -> TyThing -> Maybe [()]
+
+nameMatches fld (AConLike (RealDataCon dc))
+  | showGhc (Var.varName (dataConWrapId dc)) == fld =
+      Just [(showGhc $ flLabel lbl, showGhc $ dataConFieldType dc (flLabel lbl))
+           | lbl <- dataConFieldLabels dc]
+  | otherwise = Nothing
+nameMatches _  _ = Nothing
 
 main :: IO ()
 main = runGhc (Just libdir) $ do
@@ -230,8 +249,92 @@ main = runGhc (Just libdir) $ do
   -- liftIO $ banner "Renamed Module"
   -- liftIO $ putStrLn $ showGhc ( tm_renamed_source tmod )
 
+  let foldMapM :: (Foldable f, Monad m, Monoid b) => (a -> m b) -> f a -> m b
+      foldMapM f xs = foldr step return xs mempty where
+        step x r z = f x >>= \y -> r $! (z `mappend` y)
+
+      -- getCompl :: Int -> IO [Int]
+      -- getCompl x = return [(x * 2)]
+
+  -- compls <- liftIO $ foldMapM getCompl [1, 2, 3]
   -- liftIO $ banner "Typechecked Module"
-  -- liftIO $ putStrLn $ showGhc ( tm_typechecked_source tmod )
+  --liftIO $ putStrLn $ showGhc ( tm_typechecked_source tmod )
+
+  -- liftIO $ putStrLn $ show compls
+
+  let typeEnv = tcg_type_env $ fst $ tm_internals_ tmod
+      rdrEnv = tcg_rdr_env $ fst $ tm_internals_ tmod
+      rdrElts = globalRdrEnvElts rdrEnv
+
+      compl = getCompls rdrElts
+
+      getCompls :: [GlobalRdrElt] -> IO [(String, String)]
+      getCompls = foldMapM getComplsForOne
+
+      --getComplsForOne :: GlobalRdrElt -> IO ([String, String])
+      getComplsForOne :: GlobalRdrElt -> IO [(String, String)]
+      getComplsForOne (GRE n _ True _) =
+        case lookupTypeEnv typeEnv n of
+          Just tt -> case nameMatches "FundCon1" tt of
+            Just result ->  return result
+            Nothing -> return []
+          Nothing -> return []
+      getComplsForOne (GRE n _ False prov) = return []
+
+      -- --varToTuple :: Var -> IO ()
+      -- varToTupl :: Var -> IO [(String, String)]
+      -- varToTupl var = do
+      --   let typ = Just $ Var.varType var
+      --       name = Var.varName var
+      --   return $ [(showGhc name, showGhc typ)]
+
+  compls <- liftIO $ compl
+  liftIO $ putStrLn $ show $ compls
+
+  liftIO $ putStrLn "Done"
+
+
+
+
+
+      --getCompls :: [GlobalRdrElt] -> IO ([CompItem],QualCompls)
+      --getCompls = foldMapM getComplsForOne
+
+      -- getComplsForOne :: GlobalRdrElt -> IO ([CompItem],QualCompls)
+      -- getComplsForOne (GRE n _ True _) =
+      --   case lookupTypeEnv typeEnv n of
+      --     Just tt -> case safeTyThingId tt of
+      --       Just var -> (\x -> ([x],mempty)) <$> varToCompl var
+      --       Nothing -> (\x -> ([],mempty)) <$> [] -- toCompItem curMod curModName n
+      --     Nothing -> (\x -> ([],mempty)) <$> [] -- toCompItem curMod curModName n
+      -- getComplsForOne (GRE n _ False prov) =
+      --   flip foldMapM (map is_decl prov) $ \spec -> do
+      --     compItem <- toCompItem curMod (is_mod spec) n
+      --     let unqual
+      --           | is_qual spec = []
+      --           | otherwise = [compItem]
+      --         qual
+      --           | is_qual spec = Map.singleton asMod [compItem]
+      --           | otherwise = Map.fromList [(asMod,[compItem]),(origMod,[compItem])]
+      --         asMod = showModName (is_as spec)
+      --         origMod = showModName (is_mod spec)
+      --     return (unqual,QualCompls qual)
+
+      -- --varToCompl :: Var -> IO ()
+      -- varToCompl :: Var -> (Name, Maybe Kind)
+      -- varToCompl var = do
+      --   let typ = Just $ varType var
+      --       name = Var.varName var
+      --       return $ (name, typ)
+
+      -- toCompItem :: Module -> ModuleName -> Name -> IO CompItem
+      -- toCompItem m mn n = do
+      --   docs <- evalGhcEnv packageState $ getDocumentationTryGhc curMod (tm_parsed_module tm : deps) n
+      --   ty <- evalGhcEnv packageState $ catchSrcErrors "completion" $ do
+      --           name' <- lookupName m n
+      --           return $ name' >>= safeTyThingType
+      --   return $ mkNameCompItem n mn (either (const Nothing) id ty) Nothing docs
+
 
   -- liftIO $ banner "Typed Toplevel Definitions"
   -- liftIO $ putStrLn $ showGhc ( modInfoTyThings (moduleInfo tmod) )
