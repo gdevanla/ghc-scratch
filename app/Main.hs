@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE RecordWildCards #-}
@@ -30,6 +31,15 @@ import qualified Var
 import ConLike
 import DataCon
 import HscTypes (lookupTypeEnv)
+import TcEnv
+import IOEnv
+import TcRnMonad
+import DriverPhases (HscSource(HsSrcFile))
+import SrcLoc
+import GhcPlugins
+import GhcMonad -- (Session, unGhc, withSession)
+import FileCleanup
+import GHC.IORef
 
 banner :: MonadIO m => String -> m ()
 banner msg =
@@ -65,6 +75,14 @@ session env m = runGhc (Just libdir) $ do
   return env
 
 
+sessionWithAct :: HscEnv -> Ghc a -> IO (HscEnv, a)
+sessionWithAct env m = runGhc (Just libdir) $ do
+  setSession env
+  a <- m
+  env <- getSession
+  return (env, a)
+
+
 -- eval :: String -> Ghc ()
 -- eval inp = do
 --   dyn <- fromDynamic <$> dynCompileExpr inp
@@ -74,7 +92,7 @@ eval inp = do
   dyn <-  fromDynamic <$> dynCompileExpr inp
   case dyn of
     Nothing -> do
-      act <- compileExpr ("Prelude.print (" <> inp <> ")")
+      act <- compileExpr ("Prelude.print (" Prelude.<> inp Prelude.<> ")")
       liftIO (unsafeCoerce act)
     Just act -> liftIO act
 
@@ -195,6 +213,42 @@ nameMatches fld (AConLike (RealDataCon dc))
   | otherwise = Nothing
 nameMatches _  _ = Nothing
 
+printNames fld (AConLike (RealDataCon dc))
+  = Just [(showGhc dc, "")]
+printNames _ (AnId id) = Just [(showGhc (Var.varName id), "")]
+printNames _ x = Just [(showGhc x, "")]
+
+
+fakeSpan :: RealSrcSpan
+fakeSpan = realSrcLocSpan $ mkRealSrcLoc (fsLit "<ghcide>") 1 1
+
+lookupName :: GhcMonad m
+           => Module -- ^ A module where the Names are in scope
+           -> Name
+           -> HscEnv
+           -> m (Maybe (Maybe TyThing))
+lookupName mod name env = withSession $ \env -> liftIO $ do
+    (_messages, res) <- initTc env HsSrcFile False mod fakeSpan $ do
+        tcthing <- tcLookup name
+        case tcthing of
+            AGlobal thing    -> return (Just thing)
+            ATcId{tct_id=id} -> return (Just (AnId id))
+            _ -> return Nothing
+    return res
+
+
+--runGhcEnv :: HscEnv -> Ghc a -> IO (HscEnv, a)
+
+runGhcEnv env act = do
+    filesToClean <- newIORef emptyFilesToClean
+    dirsToClean <- newIORef mempty
+    let dflags = (hsc_dflags env){filesToClean=filesToClean, dirsToClean=dirsToClean, useUnicode=True}
+    ref <- newIORef env{hsc_dflags=dflags}
+    res <- unGhc (act env) (Session ref) `finally` do
+        cleanTempFiles dflags
+        cleanTempDirs dflags
+    (,res) <$> readIORef ref
+
 main :: IO ()
 main = runGhc (Just libdir) $ do
   env <- getSession
@@ -205,15 +259,23 @@ main = runGhc (Just libdir) $ do
   setTargets [target]
   load LoadAllTargets
   modSum <- getModSummary $ mkModuleName "Example"
+  modSum' <- getModSummary $ mkModuleName "Example2"
 
   pmod <- parseModule modSum      -- ModuleSummary
+  pmod' <- parseModule modSum'      -- ModuleSummary
   tmod <- typecheckModule pmod    -- TypecheckedSource
+  tmod' <- typecheckModule pmod'
   dmod <- desugarModule tmod      -- DesugaredModule
   let core = coreModule dmod      -- ModGuts
   --stg <- liftIO $ coreToStg dflags (mg_module core) (mg_binds core)
 
+
+  liftIO $ putStrLn $ libdir
+
   liftIO $ banner "Parsed Source"
   liftIO $ putStrLn $ showGhc (parsedSource pmod)
+  liftIO $ putStrLn $ showGhc (parsedSource pmod')
+  liftIO $ putStrLn $ showGhc (parsedSource tmod')
 
   let hsmodule = unLoc (parsedSource pmod)
   liftIO $ putStrLn $ showGhc hsmodule
@@ -244,11 +306,12 @@ main = runGhc (Just libdir) $ do
     _ -> liftIO $ putStrLn "nothing here"
 
 
+  liftIO $ banner "From local modules"
   liftIO $ putStrLn $ showGhc $ findFields "FundCon1" (unLoc <$> hsmodDecls hsmodule)
 
   -- liftIO $ banner "Renamed Module"
   -- liftIO $ putStrLn $ showGhc ( tm_renamed_source tmod )
-
+  liftIO $ banner "Other modules"
   let foldMapM :: (Foldable f, Monad m, Monoid b) => (a -> m b) -> f a -> m b
       foldMapM f xs = foldr step return xs mempty where
         step x r z = f x >>= \y -> r $! (z `mappend` y)
@@ -273,20 +336,51 @@ main = runGhc (Just libdir) $ do
 
       --getComplsForOne :: GlobalRdrElt -> IO ([String, String])
       getComplsForOne :: GlobalRdrElt -> IO [(String, String)]
-      getComplsForOne (GRE n _ True _) =
-        case lookupTypeEnv typeEnv n of
-          Just tt -> case nameMatches "FundCon1" tt of
-            Just result ->  return result
-            Nothing -> return []
-          Nothing -> return []
-      getComplsForOne (GRE n _ False prov) = return []
+      getComplsForOne (GRE n _ True _) = return [] --("", "True")] --(showGhc n, show False)]
+      getComplsForOne (GRE n _ False prov) = return [(showGhc n, (showGhc . is_mod . is_decl $ head prov))]
+        -- case lookupTypeEnv typeEnv n of
+        --   Just tt -> case nameMatches "FundConEx1" tt of
+        --     Just result ->  return result
+        --     Nothing -> return [(showGhc n, "not-found")]
+        --   Nothing -> return [(showGhc n, "not-found-2")]
+      -- getComplsForOne (GRE n _ False prov) =
+      --   flip foldMapM (map is_decl prov) $ \spec -> do
+      --     let parsedMod = tm_parsed_module tmod
+      --         mod = (ms_mod $ pm_mod_summary parsedMod)
+      --     --env <- initSession
+      --     tyThing <- ghcCatch $ runGhcEnv env (Main.lookupName mod n)
+      --     case tyThing of
+      --       -- Just (_, Just (Just tt)) -> case nameMatches "FundEx1" tt of
+      --       --     Just result -> return result
+      --       --     Nothing -> liftIO $ (return [])
+      --       -- _ -> liftIO $ return []
+      --       Just (_, Just (Just tt)) -> case printNames "" tt of
+      --         Just res -> return res
+      --         Nothing -> return []
+      --       _ -> return []
 
-      -- --varToTuple :: Var -> IO ()
-      -- varToTupl :: Var -> IO [(String, String)]
-      -- varToTupl var = do
-      --   let typ = Just $ Var.varType var
-      --       name = Var.varName var
-      --   return $ [(showGhc name, showGhc typ)]
+           --return $ name' >>= safeTyThingType
+          -- compItem <- toCompItem curMod (is_mod spec) n
+          -- let unqual
+          --       | is_qual spec = []
+          --       | otherwise = [compItem]
+          --     qual
+          --       | is_qual spec = Map.singleton asMod [compItem]
+          --       | otherwise = Map.fromList [(asMod,[compItem]),(origMod,[compItem])]
+          --     asMod = showModName (is_as spec)
+          --     origMod = showModName (is_mod spec)
+          -- return (unqual,QualCompls qual)
+
+        -- toCompItem :: Module -> ModuleName -> Name -> IO CompItem
+        -- toCompItem m mn n = do
+        --   docs <- evalGhcEnv packageState $ getDocumentationTryGhc curMod (tm_parsed_module tm : deps) n
+        --   ty <- evalGhcEnv packageState $ catchSrcErrors "completion" $ do
+        --           name' <- lookupName m n
+        --           return $ name' >>= safeTyThingType
+        --   return $ mkNameCompItem n mn (either (const Nothing) id ty) Nothing docs
+
+
+
 
   compls <- liftIO $ compl
   liftIO $ putStrLn $ show $ compls
