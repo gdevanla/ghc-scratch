@@ -329,15 +329,23 @@ main = runGhc (Just libdir) $ do
       rdrEnv = tcg_rdr_env $ fst $ tm_internals_ tmod
       rdrElts = globalRdrEnvElts rdrEnv
 
-      compl = getCompls rdrElts
-
-      getCompls :: [GlobalRdrElt] -> IO [(String, String)]
+      getCompls :: GhcMonad m => [GlobalRdrElt] -> m [(String, String)]
       getCompls = foldMapM getComplsForOne
 
       --getComplsForOne :: GlobalRdrElt -> IO ([String, String])
-      getComplsForOne :: GlobalRdrElt -> IO [(String, String)]
-      getComplsForOne (GRE n _ True _) = return [] --("", "True")] --(showGhc n, show False)]
-      getComplsForOne (GRE n _ False prov) = return [(showGhc n, (showGhc . is_mod . is_decl $ head prov))]
+
+      getComplsForOne :: GhcMonad m => GlobalRdrElt -> m [(String, String)]
+      getComplsForOne (GRE n _ True _) = return [] -- ("", "True")] --(showGhc n, show False)]
+      getComplsForOne (GRE n _ False prov)
+        |  (showGhc n) == "FundConEx2" = do
+           let imp_mod_name = is_mod . is_decl $ head prov
+           imp_modSum <- getModSummary imp_mod_name
+           pmod' <- parseModule imp_modSum
+           let hsmodule' = unLoc (parsedSource pmod')
+           let x = findFields "FundConEx1" (unLoc <$> hsmodDecls hsmodule')
+           return [(showGhc n, (showGhc x))]
+        |  otherwise = return []
+
         -- case lookupTypeEnv typeEnv n of
         --   Just tt -> case nameMatches "FundConEx1" tt of
         --     Just result ->  return result
@@ -379,10 +387,7 @@ main = runGhc (Just libdir) $ do
         --           return $ name' >>= safeTyThingType
         --   return $ mkNameCompItem n mn (either (const Nothing) id ty) Nothing docs
 
-
-
-
-  compls <- liftIO $ compl
+  compls <- getCompls rdrElts
   liftIO $ putStrLn $ show $ compls
 
   liftIO $ putStrLn "Done"
